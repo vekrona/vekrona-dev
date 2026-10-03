@@ -3,7 +3,7 @@ set -euo pipefail
 
 DEV_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 INSTANCE="${VEKRONA_DEV_INSTANCE:-vekrona-dev}"
-VEKRONA_REPO="$(readlink -f "${VEKRONA_REPO:-$HOME/.local/share/vekrona}")"
+VEKRONA_REPO="$(readlink -f "${VEKRONA_REPO:-$HOME/wrk/vekrona}")"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vekrona-dev/$INSTANCE"
 SHOTS_DIR="$STATE_DIR/shots"
 
@@ -23,12 +23,12 @@ usage() {
 usage: vekrona-dev COMMAND [ARGS...]
 
 A Lima VM running vekrona, driven by keyboard and checked on screen.
-VEKRONA_REPO (default ~/.local/share/vekrona) is the checkout under test,
+VEKRONA_REPO (default ~/wrk/vekrona) is the checkout under test,
 VEKRONA_DEV_INSTANCE (default vekrona-dev) the Lima instance name.
 
   up                          create (first time) and start the VM
   sync [--rev REV]            copy the working tree (or committed REV) into the guest checkout
-  install [--rev REV]         sync, then run ./install.sh --no-pull --skip 10-nvidia in the guest
+  install [--rev REV]         sync, then run ./install.sh --skip 10-nvidia in the guest
   session                     log in at the greeter by keyboard; waits for the sway session
   key CHORD...                press chords, e.g. super-shift-4, esc, ctrl-alt-f2
   hold CHORD MS               hold a chord down for MS milliseconds (QEMU releases it)
@@ -144,7 +144,7 @@ cmd_sync() {
 
 cmd_install() {
   cmd_sync "$@"
-  guest_login_shell 'cd "$HOME/$1" && ./install.sh --no-pull --skip 10-nvidia' "$GUEST_CHECKOUT"
+  guest_login_shell 'cd "$HOME/$1" && ./install.sh --skip 10-nvidia' "$GUEST_CHECKOUT"
 }
 
 fresh_shot() {

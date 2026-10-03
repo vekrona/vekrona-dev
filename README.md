@@ -6,13 +6,13 @@ under test (and no test dependency) touches the developer's own desktop.
 
 ```
 vekrona-dev up          # Fedora 44 cloud image under QEMU/KVM, vekrona checkout mounted read-only
-vekrona-dev install     # copy the working tree in, run ./install.sh --no-pull --skip 10-nvidia
+vekrona-dev install     # copy the working tree in, run ./install.sh --skip 10-nvidia
 vekrona-dev session     # log in at the greeter by typing, wait for sway
 vekrona-dev hold super-shift-4 1500
 vekrona-dev see luma    # 0-255 mean luminance of a fresh screenshot
 vekrona-dev see text 'Saved to'
 vekrona-dev key esc
-vekrona-dev e2e ~/.local/share/vekrona/tests/e2e/*.sh
+vekrona-dev e2e ~/wrk/vekrona/tests/e2e/*.sh
 vekrona-dev test        # vekrona's tests/run.sh, inside the VM
 vekrona-dev usb attach 1050:0407   # hand a host YubiKey to the running guest
 vekrona-dev usb detach 1050:0407   # take it back
@@ -30,7 +30,7 @@ vekrona-dev usb detach 1050:0407   # take it back
 - **Mounts** (all read-only): the vekrona checkout (`VEKRONA_REPO`) at `/mnt/vekrona`, this repo
   at `/mnt/vekrona-dev`, and the screenshot directory at `/mnt/vekrona-dev-shots`.
 - **Install.** `sync` rsyncs the working tree (tracked and untracked, `.gitignore` respected)
-  or a committed `--rev` into `~/.local/share/vekrona` in the guest; `install` runs the real
+  or a committed `--rev` into `~/.local/share/vekrona` in the guest (the guest checkout path, not the host one); `install` runs the real
   installer there. The first `session` after an install restarts the VM into the graphical
   target that the installer enabled.
 - **Input.** `lib/qmp.py` talks to Lima's `qmp.sock`: `send-key` for chords and typing,

@@ -6,7 +6,7 @@ desktop, and never install test dependencies there: do it in this VM.
 ## Feedback loop for a vekrona change
 
 1. `bin/vekrona-dev up` (once), then `bin/vekrona-dev install` after every edit in the vekrona
-   checkout (`VEKRONA_REPO`, default `~/.local/share/vekrona`). install.sh reloads a running sway.
+   checkout (`VEKRONA_REPO`, default `~/wrk/vekrona`). install.sh reloads a running sway.
 2. `bin/vekrona-dev session` to get a logged-in sway session.
 3. Reproduce with real input (`key`, `hold`, `type`, `click`) and look with `shot` (then Read
    the PNG) and `see ocr|luma|text|diff`. `sh CMD` runs CMD inside the session (SWAYSOCK set).
