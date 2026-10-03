@@ -1,0 +1,54 @@
+minimumLimaVersion: 2.0.0
+
+base:
+- template:_images/fedora-44
+
+vmType: qemu
+arch: x86_64
+cpus: 4
+memory: 6GiB
+disk: 40GiB
+
+video:
+  display: vnc
+
+containerd:
+  system: false
+  user: false
+
+portForwards:
+- guestIP: 0.0.0.0
+  proto: any
+  ignore: true
+- guestIP: 127.0.0.1
+  proto: any
+  ignore: true
+
+user:
+  name: vekrona
+  home: /home/vekrona
+
+provision:
+- mode: system
+  script: |
+    #!/bin/bash
+    set -euo pipefail
+    echo 'vekrona:vekrona' | chpasswd
+    usermod -aG wheel vekrona
+    printf '%s\n' 'vekrona ALL=(ALL) NOPASSWD: ALL' 'Defaults:vekrona !authenticate' > /etc/sudoers.d/vekrona-dev
+    chmod 0440 /etc/sudoers.d/vekrona-dev
+    visudo -cf /etc/sudoers.d/vekrona-dev
+    install -d /etc/systemd/sleep.conf.d
+    printf '%s\n' '[Sleep]' 'AllowSuspend=no' 'AllowHibernation=no' 'AllowHybridSleep=no' 'AllowSuspendThenHibernate=no' \
+      > /etc/systemd/sleep.conf.d/virtio-gpu-cannot-resume.conf
+    # Fedora 44's sshd-session domain may not reach Lima's guest-agent socket, which Lima forwards over ssh;
+    # without this, every boot after a dnf upgrade of selinux-policy/openssh comes up DEGRADED.
+    printf '%s\n' '(allow sshd_session_t var_run_t (sock_file (write)))' \
+      '(allow sshd_session_t unconfined_service_t (unix_stream_socket (connectto)))' > /etc/selinux/lima_guestagent_ssh.cil
+    modules="$(semodule -l)"
+    grep -qx lima_guestagent_ssh <<<"$modules" || semodule -i /etc/selinux/lima_guestagent_ssh.cil
+    packages=(
+      tesseract tesseract-langpack-eng python3-opencv libinput-utils rsync git inotify-tools
+      python3-gobject dbus-daemon python3-dasbus python3-fido2 anaconda-core
+    )
+    rpm -q "${packages[@]}" >/dev/null || dnf install -y --setopt=install_weak_deps=False "${packages[@]}"

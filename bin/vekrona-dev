@@ -1,0 +1,351 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEV_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+INSTANCE="${VEKRONA_DEV_INSTANCE:-vekrona-dev}"
+VEKRONA_REPO="$(readlink -f "${VEKRONA_REPO:-$HOME/.local/share/vekrona}")"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/vekrona-dev/$INSTANCE"
+SHOTS_DIR="$STATE_DIR/shots"
+
+GUEST_VEKRONA_MOUNT=/mnt/vekrona
+GUEST_DEV_MOUNT=/mnt/vekrona-dev
+GUEST_SHOTS_MOUNT=/mnt/vekrona-dev-shots
+GUEST_CHECKOUT=.local/share/vekrona
+GUEST_USER=vekrona
+GUEST_PASSWORD=vekrona
+GREETER_TIMEOUT_SEC=120
+LOGIN_TIMEOUT_SEC=120
+SCREEN_TIMEOUT_SEC=30
+
+usage() {
+  cat >&2 <<'USAGE'
+usage: vekrona-dev COMMAND [ARGS...]
+
+A Lima VM running vekrona, driven by keyboard and checked on screen.
+VEKRONA_REPO (default ~/.local/share/vekrona) is the checkout under test,
+VEKRONA_DEV_INSTANCE (default vekrona-dev) the Lima instance name.
+
+  up                          create (first time) and start the VM
+  sync [--rev REV]            copy the working tree (or committed REV) into the guest checkout
+  install [--rev REV]         sync, then run ./install.sh --no-pull --skip 10-nvidia in the guest
+  session                     log in at the greeter by keyboard; waits for the sway session
+  key CHORD...                press chords, e.g. super-shift-4, esc, ctrl-alt-f2
+  hold CHORD MS               hold a chord down for MS milliseconds (QEMU releases it)
+  type [--enter] TEXT         type text (US layout)
+  click X Y [--button B] [--double]
+  click-text REGEX            click the first word on screen matching REGEX (OCR); waits up to 30s for it
+  shot [ABSOLUTE.png]         save a screenshot (default: a new file the guest can read); prints its path
+  see ocr|luma [IMAGE]        OCR text / mean luminance (0-255) of IMAGE or a fresh screenshot
+  see text REGEX [IMAGE]      exit 0 if OCR text matches REGEX (case-insensitive)
+  see find REGEX [IMAGE]      print "X Y", the center of the first word matching REGEX
+  see diff IMAGE [IMAGE2]     mean absolute difference (0-255) to IMAGE2 or a fresh screenshot
+  until --timeout SEC -- CMD...   rerun CMD back to back until it succeeds or SEC pass
+  sh CMD...                   run CMD in the guest inside the sway session environment
+  spawn [--root] OUT -- CMD...    start CMD detached in the guest (in the session unless --root),
+                              line-buffered output to the guest file OUT
+  run CMD...                  run CMD in the guest without a session
+  test                        run the checkout's tests/run.sh in the guest
+  events OUT EVENT...         record sway IPC events (e.g. binding) as JSON lines in the guest file OUT;
+                              its first line, {"subscribed": [...]}, says the subscription is live
+  checks                      run the checkout's guest checks (vm/*-check.sh), then a snapshot,
+                              rollback and reboot round trip
+  e2e SCRIPT...               run host-side scenario scripts against the VM
+  self-test                   run vekrona-dev's own tests in the guest
+  down | destroy              stop the VM | delete it and its state
+USAGE
+  exit 2
+}
+
+die() { echo "vekrona-dev: $*" >&2; exit 1; }
+log() { echo "[vekrona-dev] $*" >&2; }
+
+lima_dir() { limactl list --format '{{.Dir}}' "$INSTANCE"; }
+instance_status() { limactl list --format '{{.Status}}' "$INSTANCE"; }
+
+instance_exists() {
+  local names
+  names="$(limactl list -q)" || die "limactl list failed"
+  grep -qx -- "$INSTANCE" <<<"$names"
+}
+
+require_running() {
+  instance_exists || die "no VM '$INSTANCE'; run: vekrona-dev up"
+  [[ "$(instance_status)" == Running ]] || die "VM '$INSTANCE' is not running; run: vekrona-dev up"
+}
+
+qmp() { python3 -B "$DEV_ROOT/lib/qmp.py" --sock "$(lima_dir)/qmp.sock" "$@"; }
+guest() { limactl shell --workdir / "$INSTANCE" -- "$@"; }
+guest_login_shell() { guest bash -lc "$1" vekrona-dev "${@:2}"; }
+
+guest_in_session() {
+  guest bash -c 'source "$1" && shift && exec "$@"' vekrona-dev "$GUEST_DEV_MOUNT/guest/session-env.sh" "$@"
+}
+
+mounts_expression() {
+  python3 -c 'import json, sys
+mounts = [{"location": sys.argv[i], "mountPoint": sys.argv[i + 1], "writable": False, "9p": {"cache": "mmap"}}
+          for i in range(1, len(sys.argv), 2)]
+print(".mounts = " + json.dumps(mounts))' \
+    "$VEKRONA_REPO" "$GUEST_VEKRONA_MOUNT" "$DEV_ROOT" "$GUEST_DEV_MOUNT" "$SHOTS_DIR" "$GUEST_SHOTS_MOUNT"
+}
+
+cmd_up() {
+  [[ $# -eq 0 ]] || usage
+  [[ -f "$VEKRONA_REPO/install.sh" ]] || die "VEKRONA_REPO=$VEKRONA_REPO is not a vekrona checkout"
+  mkdir -p "$SHOTS_DIR"
+  if ! instance_exists; then
+    log "creating $INSTANCE with $VEKRONA_REPO mounted at $GUEST_VEKRONA_MOUNT"
+    limactl create --name "$INSTANCE" --tty=false --set "$(mounts_expression)" "$DEV_ROOT/lima/vekrona.yaml"
+  fi
+  [[ "$(instance_status)" == Running ]] || limactl start --tty=false "$INSTANCE"
+  guest test -f "$GUEST_VEKRONA_MOUNT/install.sh" \
+    || die "$GUEST_VEKRONA_MOUNT in the guest is not a vekrona checkout; the VM was created for another VEKRONA_REPO, run: vekrona-dev destroy"
+}
+
+cmd_sync() {
+  local rev=""
+  case "${1-}" in
+    --rev) [[ $# -eq 2 ]] || usage; rev="$2" ;;
+    "") [[ $# -eq 0 ]] || usage ;;
+    *) usage ;;
+  esac
+  require_running
+  if [[ -n "$rev" ]]; then
+    log "syncing committed $rev into ~/$GUEST_CHECKOUT"
+    guest bash -c 'set -euo pipefail
+      scratch="$(mktemp -d)"
+      trap "rm -rf \"\$scratch\"" EXIT
+      git clone -q --no-checkout "$1" "$scratch/src"
+      git -C "$scratch/src" checkout -q --detach "$2"
+      mkdir -p "$HOME/$3"
+      rsync -a --delete "$scratch/src/" "$HOME/$3/"' vekrona-dev "$GUEST_VEKRONA_MOUNT" "$rev" "$GUEST_CHECKOUT"
+  else
+    log "syncing the working tree into ~/$GUEST_CHECKOUT"
+    guest bash -c 'set -euo pipefail
+      mkdir -p "$HOME/$2"
+      rsync -a --delete --filter=":- .gitignore" "$1/" "$HOME/$2/"' vekrona-dev "$GUEST_VEKRONA_MOUNT" "$GUEST_CHECKOUT"
+  fi
+}
+
+cmd_install() {
+  cmd_sync "$@"
+  guest_login_shell 'cd "$HOME/$1" && ./install.sh --no-pull --skip 10-nvidia' "$GUEST_CHECKOUT"
+  if guest pgrep -u "$GUEST_USER" -x sway >/dev/null; then
+    log "reloading the running sway session"
+    guest_in_session swaymsg reload >/dev/null
+  fi
+}
+
+fresh_shot() {
+  local path
+  path="$(mktemp -p "$SHOTS_DIR" shot-XXXXXX.png)"
+  qmp shot "$path" >/dev/null
+  echo "$path"
+}
+
+guest_image_path() {
+  local path
+  path="$(readlink -f "$1")"
+  [[ -f "$path" ]] || die "no such image: $1"
+  [[ "$path" == "$SHOTS_DIR"/* ]] || die "images must live under $SHOTS_DIR (the guest sees only that directory): $1"
+  echo "$GUEST_SHOTS_MOUNT/${path#"$SHOTS_DIR"/}"
+}
+
+vision() { guest python3 -B "$GUEST_DEV_MOUNT/guest/vision.py" "$@"; }
+
+see_fresh() {
+  local shot status=0
+  shot="$(fresh_shot)"
+  "$@" "$(guest_image_path "$shot")" || status=$?
+  rm -f "$shot"
+  return "$status"
+}
+
+cmd_see() {
+  [[ $# -ge 1 ]] || usage
+  require_running
+  local what="$1"
+  shift
+  case "$what" in
+    ocr | luma)
+      [[ $# -le 1 ]] || usage
+      if [[ $# -eq 1 ]]; then vision "$what" "$(guest_image_path "$1")"; else see_fresh vision "$what"; fi
+      ;;
+    text | find)
+      [[ $# -ge 1 && $# -le 2 ]] || usage
+      if [[ $# -eq 2 ]]; then
+        vision "$what" "$(guest_image_path "$2")" "$1"
+      else
+        see_fresh vision_with_regex "$what" "$1"
+      fi
+      ;;
+    diff)
+      [[ $# -ge 1 && $# -le 2 ]] || usage
+      if [[ $# -eq 2 ]]; then
+        vision diff "$(guest_image_path "$1")" "$(guest_image_path "$2")"
+      else
+        see_fresh vision diff "$(guest_image_path "$1")"
+      fi
+      ;;
+    *) usage ;;
+  esac
+}
+
+vision_with_regex() { vision "$1" "$3" "$2"; }
+see_text_in() { vision text "$2" "$1"; }
+
+locate_text() { see_fresh vision_with_regex find "$1" 2>/dev/null; }
+
+click_text() {
+  local center x y
+  run_until "$SCREEN_TIMEOUT_SEC" locate_text "$1" >/dev/null \
+    || die "no text matching '$1' on screen after ${SCREEN_TIMEOUT_SEC}s"
+  center="$(locate_text "$1")" || die "text matching '$1' left the screen"
+  read -r x y <<<"$center"
+  qmp click "$x" "$y"
+}
+
+run_until() {
+  local timeout_sec="$1"
+  shift
+  local deadline=$((SECONDS + timeout_sec))
+  until "$@"; do
+    ((SECONDS < deadline)) || return 1
+  done
+}
+
+cmd_until() {
+  [[ $# -ge 4 && "$1" == --timeout && "$3" == -- ]] || usage
+  [[ "$2" =~ ^[0-9]+$ ]] || die "--timeout needs whole seconds, got: $2"
+  local timeout_sec="$2"
+  shift 3
+  run_until "$timeout_sec" "$@" || die "still failing after ${timeout_sec}s: $*"
+}
+
+screen_shows() { see_fresh see_text_in "$1" 2>/dev/null; }
+
+session_lock_state() { guest_in_session dms ipc call lock isLocked 2>/dev/null; }
+session_reports_lock() { [[ "$(session_lock_state)" =~ ^(true|false)$ ]]; }
+session_unlocked() { [[ "$(session_lock_state)" == false ]]; }
+
+log_in() {
+  if ! guest systemctl is-active --quiet greetd; then
+    [[ "$(guest systemctl get-default)" == graphical.target ]] || die "no graphical target in the guest; run: vekrona-dev install"
+    log "greetd is not running yet; restarting the VM into the graphical target"
+    limactl restart --tty=false "$INSTANCE"
+  fi
+  log "waiting for the greeter"
+  run_until "$GREETER_TIMEOUT_SEC" screen_shows 'username|password' || die "no greeter on screen after ${GREETER_TIMEOUT_SEC}s"
+  if screen_shows 'username'; then
+    qmp type --enter "$GUEST_USER"
+    run_until "$GREETER_TIMEOUT_SEC" screen_shows 'password' || die "the greeter never asked for a password"
+  fi
+  qmp type --enter "$GUEST_PASSWORD"
+  log "waiting for sway"
+  guest "$GUEST_DEV_MOUNT/guest/wait-sway.sh" "$LOGIN_TIMEOUT_SEC"
+}
+
+cmd_session() {
+  [[ $# -eq 0 ]] || usage
+  require_running
+  if guest pgrep -u "$GUEST_USER" -x sway >/dev/null; then
+    log "sway session already running"
+  else
+    log_in
+  fi
+  run_until "$LOGIN_TIMEOUT_SEC" session_reports_lock || die "DMS never answered 'lock isLocked' after ${LOGIN_TIMEOUT_SEC}s"
+  if ! session_unlocked; then
+    log "the session is locked; unlocking it at the lock screen"
+    click_text 'password'
+    qmp type --enter "$GUEST_PASSWORD"
+    run_until "$LOGIN_TIMEOUT_SEC" session_unlocked || die "the lock screen did not unlock after ${LOGIN_TIMEOUT_SEC}s"
+  fi
+  log "sway session is up and unlocked"
+}
+
+cmd_spawn() {
+  local as_root=0
+  if [[ "${1-}" == --root ]]; then
+    as_root=1
+    shift
+  fi
+  [[ $# -ge 3 && "$2" == -- ]] || usage
+  local out="$1"
+  shift 2
+  require_running
+  local detach='out="$1"; shift; setsid -f stdbuf -oL "$@" </dev/null >"$out" 2>&1'
+  if ((as_root)); then
+    guest sudo bash -c "$detach" vekrona-dev "$out" "$@"
+  else
+    guest_in_session bash -c "$detach" vekrona-dev "$out" "$@"
+  fi
+}
+
+cmd_checks() {
+  [[ $# -eq 0 ]] || usage
+  require_running
+  local check snapshot state
+  for check in session-check agents-check errors-check agent-launch-check session-teardown; do
+    log "check: vm/$check.sh"
+    guest_login_shell 'cd "$HOME/$1" && bash "vm/$2.sh"' "$GUEST_CHECKOUT" "$check"
+  done
+  snapshot="$(guest_login_shell 'sudo "$HOME/.local/bin/vekrona-snapshot" vekrona-dev')"
+  [[ "$snapshot" =~ ^[0-9]+$ ]] || die "vekrona-snapshot did not print a snapshot number: $snapshot"
+  log "rolling back to snapshot $snapshot and rebooting"
+  guest_login_shell 'sudo "$HOME/.local/bin/vekrona-rollback" --yes "$1"' "$snapshot"
+  limactl restart --tty=false "$INSTANCE"
+  guest_login_shell 'cd "$HOME/$1" && sudo bash vm/rollback-check.sh "$2"' "$GUEST_CHECKOUT" "$snapshot"
+  state="$(guest systemctl is-system-running --wait)" || true
+  if [[ "$state" != running ]]; then
+    guest systemctl --failed --no-legend >&2
+    die "the guest did not boot cleanly after the rollback: $state"
+  fi
+  guest_login_shell 'cd "$HOME/$1" && bash vm/login-manager-check.sh' "$GUEST_CHECKOUT"
+  log "checks passed"
+}
+
+cmd_e2e() {
+  [[ $# -ge 1 ]] || usage
+  require_running
+  local script failed=()
+  for script in "$@"; do
+    log "e2e: $script"
+    PATH="$DEV_ROOT/bin:$PATH" VEKRONA_REPO="$VEKRONA_REPO" VEKRONA_DEV_INSTANCE="$INSTANCE" bash "$script" || failed+=("$script")
+  done
+  ((${#failed[@]} == 0)) || die "failed: ${failed[*]}"
+}
+
+cmd_destroy() {
+  [[ $# -eq 0 ]] || usage
+  if instance_exists; then
+    limactl delete --force "$INSTANCE"
+  fi
+  rm -rf "$STATE_DIR"
+}
+
+command -v limactl >/dev/null || die "limactl not found; install Lima (e.g. nix profile add nixpkgs#lima)"
+[[ $# -ge 1 ]] || usage
+command="$1"
+shift
+case "$command" in
+  up) cmd_up "$@" ;;
+  sync) cmd_sync "$@" ;;
+  install) cmd_install "$@" ;;
+  session) cmd_session "$@" ;;
+  key | hold | type | click) require_running; qmp "$command" "$@" ;;
+  click-text) [[ $# -eq 1 ]] || usage; require_running; click_text "$1" ;;
+  shot) [[ $# -le 1 ]] || usage; require_running; if [[ $# -eq 1 ]]; then qmp shot "$1"; else fresh_shot; fi ;;
+  see) cmd_see "$@" ;;
+  until) cmd_until "$@" ;;
+  sh) [[ $# -ge 1 ]] || usage; require_running; guest_in_session "$@" ;;
+  spawn) cmd_spawn "$@" ;;
+  events) [[ $# -ge 2 ]] || usage; cmd_spawn "$1" -- python3 -B "$GUEST_DEV_MOUNT/guest/sway-events.py" "${@:2}" ;;
+  checks) cmd_checks "$@" ;;
+  run) [[ $# -ge 1 ]] || usage; require_running; guest "$@" ;;
+  test) [[ $# -eq 0 ]] || usage; require_running; guest_login_shell 'cd "$HOME/$1" && bash tests/run.sh' "$GUEST_CHECKOUT" ;;
+  e2e) cmd_e2e "$@" ;;
+  self-test) [[ $# -eq 0 ]] || usage; require_running; guest bash "$GUEST_DEV_MOUNT/tests/run.sh" ;;
+  down) [[ $# -eq 0 ]] || usage; limactl stop "$INSTANCE" ;;
+  destroy) cmd_destroy "$@" ;;
+  *) usage ;;
+esac
