@@ -33,6 +33,7 @@ VEKRONA_DEV_INSTANCE (default vekrona-dev) the Lima instance name.
   key CHORD...                press chords, e.g. super-shift-4, esc, ctrl-alt-f2
   hold CHORD MS               hold a chord down for MS milliseconds (QEMU releases it)
   type [--enter] TEXT         type text (US layout)
+  move X Y                    move the pointer without clicking
   click X Y [--button B] [--double]
   click-text REGEX            click the first word on screen matching REGEX (OCR); waits up to 30s for it
   shot [ABSOLUTE.png]         save a screenshot (default: a new file the guest can read); prints its path
@@ -398,7 +399,7 @@ case "$command" in
   sync) cmd_sync "$@" ;;
   install) cmd_install "$@" ;;
   session) cmd_session "$@" ;;
-  key | hold | type | click) require_running; qmp "$command" "$@" ;;
+  key | hold | type | move | click) require_running; qmp "$command" "$@" ;;
   click-text) [[ $# -eq 1 ]] || usage; require_running; click_text "$1" ;;
   shot) [[ $# -le 1 ]] || usage; require_running; if [[ $# -eq 1 ]]; then qmp shot "$1"; else fresh_shot; fi ;;
   see) cmd_see "$@" ;;

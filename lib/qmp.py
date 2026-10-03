@@ -242,19 +242,29 @@ def button_event(button, down):
     return {"type": "btn", "data": {"down": down, "button": button}}
 
 
-def command_click(args):
-    probe = os.path.join(os.path.dirname(os.path.abspath(args.sock)), "click-probe.png")
-    connection = connect_negotiated(args.sock)
+def move_pointer(connection, sock, x, y):
+    probe = os.path.join(os.path.dirname(os.path.abspath(sock)), "click-probe.png")
     screendump(connection, probe)
     try:
         width, height = png_size(probe)
     finally:
         os.unlink(probe)
     move = [
-        abs_axis_event("x", scale_to_abs(args.x, width, "x")),
-        abs_axis_event("y", scale_to_abs(args.y, height, "y")),
+        abs_axis_event("x", scale_to_abs(x, width, "x")),
+        abs_axis_event("y", scale_to_abs(y, height, "y")),
     ]
     connection.execute("input-send-event", {"events": move})
+
+
+def command_move(args):
+    connection = connect_negotiated(args.sock)
+    move_pointer(connection, args.sock, args.x, args.y)
+    connection.close()
+
+
+def command_click(args):
+    connection = connect_negotiated(args.sock)
+    move_pointer(connection, args.sock, args.x, args.y)
     for _ in range(2 if args.double else 1):
         connection.execute("input-send-event", {"events": [button_event(args.button, True)]})
         connection.execute("input-send-event", {"events": [button_event(args.button, False)]})
@@ -302,6 +312,11 @@ def build_parser():
     shot = commands.add_parser("shot")
     shot.add_argument("output")
     shot.set_defaults(run=command_shot)
+
+    move = commands.add_parser("move")
+    move.add_argument("x", type=int)
+    move.add_argument("y", type=int)
+    move.set_defaults(run=command_move)
 
     click = commands.add_parser("click")
     click.add_argument("x", type=int)
