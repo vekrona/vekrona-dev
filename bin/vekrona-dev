@@ -143,10 +143,6 @@ cmd_sync() {
 cmd_install() {
   cmd_sync "$@"
   guest_login_shell 'cd "$HOME/$1" && ./install.sh --no-pull --skip 10-nvidia' "$GUEST_CHECKOUT"
-  if guest pgrep -u "$GUEST_USER" -x sway >/dev/null; then
-    log "reloading the running sway session"
-    guest_in_session swaymsg reload >/dev/null
-  fi
 }
 
 fresh_shot() {
