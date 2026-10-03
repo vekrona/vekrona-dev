@@ -16,6 +16,7 @@ GUEST_PASSWORD=vekrona
 GREETER_TIMEOUT_SEC=120
 LOGIN_TIMEOUT_SEC=120
 SCREEN_TIMEOUT_SEC=30
+USB_TIMEOUT_SEC=30
 
 usage() {
   cat >&2 <<'USAGE'
@@ -39,6 +40,7 @@ VEKRONA_DEV_INSTANCE (default vekrona-dev) the Lima instance name.
   see text REGEX [IMAGE]      exit 0 if OCR text matches REGEX (case-insensitive)
   see find REGEX [IMAGE]      print "X Y", the center of the first word matching REGEX
   see diff IMAGE [IMAGE2]     mean absolute difference (0-255) to IMAGE2 or a fresh screenshot
+  usb attach|detach VID:PID   hot-plug a host USB device (e.g. a YubiKey) into the guest / unplug it
   until --timeout SEC -- CMD...   rerun CMD back to back until it succeeds or SEC pass
   sh CMD...                   run CMD in the guest inside the sway session environment
   spawn [--root] OUT -- CMD...    start CMD detached in the guest (in the session unless --root),
@@ -326,6 +328,61 @@ cmd_e2e() {
   ((${#failed[@]} == 0)) || die "failed: ${failed[*]}"
 }
 
+usb_sysfs_device() {
+  local dev
+  for dev in /sys/bus/usb/devices/*; do
+    [[ -r "$dev/idVendor" && -r "$dev/idProduct" ]] || continue
+    [[ "$(<"$dev/idVendor")" == "${1%%:*}" && "$(<"$dev/idProduct")" == "${1##*:}" ]] || continue
+    echo "$dev"
+    return 0
+  done
+  return 1
+}
+
+usb_require_unclaimed() {
+  local interface drivers=()
+  for interface in "$1":*; do
+    [[ -e "$interface" ]] || continue
+    drivers+=("$(basename "$interface")=$(basename "$(readlink "$interface/driver" 2>/dev/null || echo unbound)")")
+  done
+  [[ " ${drivers[*]} " == *=usbfs\ * ]] || return 0
+  die "USB device $2 ($1) has an interface claimed by another host process through usbfs; QEMU cannot take it over. Interface drivers: ${drivers[*]}. Usually pcscd holds a security key's CCID interface: run 'sudo systemctl stop pcscd.socket pcscd.service' and retry"
+}
+
+guest_sees_usb() {
+  guest bash -c 'for dev in /sys/bus/usb/devices/*; do
+    [[ "$(cat "$dev/idVendor" 2>/dev/null)" == "$1" && "$(cat "$dev/idProduct" 2>/dev/null)" == "$2" ]] && exit 0
+  done
+  exit 1' vekrona-dev "${1%%:*}" "${1##*:}"
+}
+
+# exit 1 is the guest script's "not present"; anything else (e.g. ssh 255) is not proof of absence
+guest_lost_usb() {
+  local status=0
+  guest_sees_usb "$1" || status=$?
+  ((status == 1))
+}
+
+cmd_usb() {
+  [[ $# -eq 2 ]] || usage
+  local action="$1" spec="${2,,}" dev
+  [[ "$spec" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "USB device must be VID:PID in hex (e.g. 1050:0407), got: $2"
+  require_running
+  case "$action" in
+    attach)
+      dev="$(usb_sysfs_device "$spec")" || die "USB device $spec is not plugged into the host"
+      usb_require_unclaimed "$dev" "$spec"
+      qmp usb-attach "$spec"
+      run_until "$USB_TIMEOUT_SEC" guest_sees_usb "$spec" || die "the guest did not see USB device $spec after ${USB_TIMEOUT_SEC}s"
+      ;;
+    detach)
+      qmp usb-detach "$spec"
+      run_until "$USB_TIMEOUT_SEC" guest_lost_usb "$spec" || die "the guest still sees USB device $spec ${USB_TIMEOUT_SEC}s after detach"
+      ;;
+    *) usage ;;
+  esac
+}
+
 cmd_destroy() {
   [[ $# -eq 0 ]] || usage
   if instance_exists; then
@@ -347,6 +404,7 @@ case "$command" in
   click-text) [[ $# -eq 1 ]] || usage; require_running; click_text "$1" ;;
   shot) [[ $# -le 1 ]] || usage; require_running; if [[ $# -eq 1 ]]; then qmp shot "$1"; else fresh_shot; fi ;;
   see) cmd_see "$@" ;;
+  usb) cmd_usb "$@" ;;
   until) cmd_until "$@" ;;
   sh) [[ $# -ge 1 ]] || usage; require_running; guest_in_session "$@" ;;
   spawn) cmd_spawn "$@" ;;

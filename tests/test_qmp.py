@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 import socket
@@ -9,6 +10,9 @@ import unittest
 from pathlib import Path
 
 QMP = Path(__file__).resolve().parents[1] / "lib" / "qmp.py"
+_spec = importlib.util.spec_from_file_location("qmp", QMP)
+qmp_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(qmp_module)
 
 
 class FakeQemu:
@@ -90,6 +94,33 @@ class QmpTest(unittest.TestCase):
                                  "key", "esc"], capture_output=True, text=True, timeout=30)
         self.assertEqual(result.returncode, 1)
         self.assertIn("cannot connect", result.stderr)
+
+    def test_attaching_a_usb_device_adds_a_usb_host_device_with_a_stable_id(self):
+        self.assertEqual(self.qmp("usb-attach", "1050:0407").returncode, 0)
+        self.assertEqual(self.sent("device_add"), [{
+            "driver": "usb-host", "bus": "usb-bus.0", "id": "hostusb-1050-0407",
+            "vendorid": 0x1050, "productid": 0x0407,
+        }])
+
+    def test_detaching_a_usb_device_deletes_it_by_the_attach_id(self):
+        self.assertEqual(self.qmp("usb-detach", "1050:0407").returncode, 0)
+        self.assertEqual(self.sent("device_del"), [{"id": "hostusb-1050-0407"}])
+
+    def test_the_usb_id_ignores_hex_case(self):
+        self.assertEqual(qmp_module.usb_device_id("ABCD:00ef"), qmp_module.usb_device_id("abcd:00EF"))
+
+    def test_a_usb_spec_must_be_vid_colon_pid_in_hex(self):
+        self.assertEqual(qmp_module.parse_usb_spec("1050:0407"), (0x1050, 0x0407))
+        for spec in ("", "lizard", "1050", "1050:04070", "zzzz:0407", "1050:0407:1"):
+            with self.subTest(spec=spec):
+                with self.assertRaises(qmp_module.QmpError):
+                    qmp_module.parse_usb_spec(spec)
+
+    def test_a_malformed_usb_spec_never_reaches_qemu(self):
+        result = self.qmp("usb-attach", "lizard")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("VID:PID", result.stderr)
+        self.assertEqual(self.sent("device_add"), [])
 
 
 if __name__ == "__main__":

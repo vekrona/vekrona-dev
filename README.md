@@ -14,6 +14,8 @@ vekrona-dev see text 'Saved to'
 vekrona-dev key esc
 vekrona-dev e2e ~/.local/share/vekrona/tests/e2e/*.sh
 vekrona-dev test        # vekrona's tests/run.sh, inside the VM
+vekrona-dev usb attach 1050:0407   # hand a host YubiKey to the running guest
+vekrona-dev usb detach 1050:0407   # take it back
 ```
 
 `vekrona-dev` with no arguments lists every command.
@@ -34,6 +36,12 @@ vekrona-dev test        # vekrona's tests/run.sh, inside the VM
 - **Input.** `lib/qmp.py` talks to Lima's `qmp.sock`: `send-key` for chords and typing,
   `send-key` with `hold-time` for held keys (QEMU times the release), `input-send-event` for
   clicks, `screendump` for screenshots.
+- **USB.** `usb attach VID:PID` sends QMP `device_add` (`usb-host` on Lima's `usb-bus`, id
+  `hostusb-VID-PID`), then waits until the guest's sysfs lists the device; `usb detach` sends
+  `device_del` for the same id. QEMU opens the device node itself, so the user needs read/write
+  access to it (e.g. `sudo setfacl -m u:$USER:rw /dev/bus/usb/BUS/DEV`). If a host process holds
+  an interface through usbfs, attach refuses: for a security key that is `pcscd`, so run
+  `sudo systemctl stop pcscd.socket pcscd.service` first.
 - **Vision.** `guest/vision.py` runs inside the VM (so OpenCV and tesseract never land on the
   host): OCR, mean luminance, mean difference between two screenshots. Deterministic and
   offline; no model judges a screenshot.

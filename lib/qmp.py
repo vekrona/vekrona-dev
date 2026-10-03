@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import re
 import socket
 import struct
 import sys
@@ -62,6 +63,9 @@ SHIFTED_PUNCTUATION = {
     "|": "backslash",
     "~": "grave_accent",
 }
+
+
+USB_SPEC = re.compile(r"([0-9a-fA-F]{4}):([0-9a-fA-F]{4})")
 
 
 class QmpError(Exception):
@@ -159,6 +163,33 @@ def screendump(connection, destination):
     connection.execute("screendump", {"filename": destination, "format": "png"})
 
 
+def parse_usb_spec(spec):
+    match = USB_SPEC.fullmatch(spec)
+    if match is None:
+        raise QmpError(f"USB device must be VID:PID in hex (e.g. 1050:0407), got {spec!r}")
+    return int(match[1], 16), int(match[2], 16)
+
+
+def usb_device_id(spec):
+    vendor_id, product_id = parse_usb_spec(spec)
+    return f"hostusb-{vendor_id:04x}-{product_id:04x}"
+
+
+def usb_attach_arguments(spec):
+    vendor_id, product_id = parse_usb_spec(spec)
+    return {
+        "driver": "usb-host",
+        "bus": "usb-bus.0",
+        "id": usb_device_id(spec),
+        "vendorid": vendor_id,
+        "productid": product_id,
+    }
+
+
+def usb_detach_arguments(spec):
+    return {"id": usb_device_id(spec)}
+
+
 def command_key(args):
     chords = [parse_chord(chord) for chord in args.keys]
     connection = connect_negotiated(args.sock)
@@ -230,6 +261,20 @@ def command_click(args):
     connection.close()
 
 
+def command_usb_attach(args):
+    arguments = usb_attach_arguments(args.spec)
+    connection = connect_negotiated(args.sock)
+    connection.execute("device_add", arguments)
+    connection.close()
+
+
+def command_usb_detach(args):
+    arguments = usb_detach_arguments(args.spec)
+    connection = connect_negotiated(args.sock)
+    connection.execute("device_del", arguments)
+    connection.close()
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="QMP keyboard, mouse and screen client for a QEMU VM")
     parser.add_argument("--sock", required=True)
@@ -259,6 +304,14 @@ def build_parser():
     click.add_argument("--button", choices=["left", "right", "middle"], default="left")
     click.add_argument("--double", action="store_true")
     click.set_defaults(run=command_click)
+
+    usb_attach = commands.add_parser("usb-attach")
+    usb_attach.add_argument("spec")
+    usb_attach.set_defaults(run=command_usb_attach)
+
+    usb_detach = commands.add_parser("usb-detach")
+    usb_detach.add_argument("spec")
+    usb_detach.set_defaults(run=command_usb_detach)
     return parser
 
 
