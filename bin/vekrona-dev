@@ -371,6 +371,7 @@ cmd_usb() {
       usb_require_unclaimed "$dev" "$spec"
       qmp usb-attach "$spec"
       run_until "$USB_TIMEOUT_SEC" guest_sees_usb "$spec" || die "the guest did not see USB device $spec after ${USB_TIMEOUT_SEC}s"
+      log "USB device $spec now belongs to the VM: the host cannot use it, even after a replug, until: vekrona-dev usb detach $spec"
       ;;
     detach)
       qmp usb-detach "$spec"

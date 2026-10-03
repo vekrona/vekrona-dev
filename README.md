@@ -41,7 +41,9 @@ vekrona-dev usb detach 1050:0407   # take it back
   `device_del` for the same id. QEMU opens the device node itself, so the user needs read/write
   access to it (e.g. `sudo setfacl -m u:$USER:rw /dev/bus/usb/BUS/DEV`). If a host process holds
   an interface through usbfs, attach refuses: for a security key that is `pcscd`, so run
-  `sudo systemctl stop pcscd.socket pcscd.service` first.
+  `sudo systemctl stop pcscd.socket pcscd.service` first. While attached, the device belongs to
+  the VM: the host cannot use it, and QEMU takes it back on every replug (it matches VID:PID),
+  until `usb detach`. Never attach the user's only security key without detaching it afterwards.
 - **Vision.** `guest/vision.py` runs inside the VM (so OpenCV and tesseract never land on the
   host): OCR, mean luminance, mean difference between two screenshots. Deterministic and
   offline; no model judges a screenshot.
