@@ -85,6 +85,7 @@ print(next(m["location"] for m in json.load(sys.stdin)["config"]["mounts"] if m[
 }
 
 qmp() { python3 -B "$DEV_ROOT/lib/qmp.py" --sock "$(lima_dir)/qmp.sock" "$@"; }
+validate_usb_spec() { python3 -B "$DEV_ROOT/lib/qmp.py" usb-spec "$1"; }
 guest() { limactl shell --workdir / "$INSTANCE" -- "$@"; }
 guest_login_shell() { guest bash -lc "$1" vekrona-dev "${@:2}"; }
 
@@ -361,8 +362,8 @@ guest_lost_usb() {
 
 cmd_usb() {
   [[ $# -eq 2 ]] || usage
-  local action="$1" spec="${2,,}" dev
-  [[ "$spec" =~ ^[0-9a-f]{4}:[0-9a-f]{4}$ ]] || die "USB device must be VID:PID in hex (e.g. 1050:0407), got: $2"
+  local action="$1" spec dev
+  spec="$(validate_usb_spec "$2")" || exit 1
   require_running
   case "$action" in
     attach)

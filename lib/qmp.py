@@ -275,9 +275,14 @@ def command_usb_detach(args):
     connection.close()
 
 
+def command_usb_spec(args):
+    vendor_id, product_id = parse_usb_spec(args.spec)
+    print(f"{vendor_id:04x}:{product_id:04x}")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="QMP keyboard, mouse and screen client for a QEMU VM")
-    parser.add_argument("--sock", required=True)
+    parser.add_argument("--sock", help="QMP socket; every command except usb-spec talks to QEMU through it")
     commands = parser.add_subparsers(dest="command", required=True)
 
     key = commands.add_parser("key")
@@ -312,11 +317,18 @@ def build_parser():
     usb_detach = commands.add_parser("usb-detach")
     usb_detach.add_argument("spec")
     usb_detach.set_defaults(run=command_usb_detach)
+
+    usb_spec = commands.add_parser("usb-spec")
+    usb_spec.add_argument("spec")
+    usb_spec.set_defaults(run=command_usb_spec)
     return parser
 
 
 def main():
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args = parser.parse_args()
+    if args.command != "usb-spec" and args.sock is None:
+        parser.error(f"--sock is required for {args.command}")
     try:
         args.run(args)
     except QmpError as err:

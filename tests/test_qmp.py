@@ -122,6 +122,24 @@ class QmpTest(unittest.TestCase):
         self.assertIn("VID:PID", result.stderr)
         self.assertEqual(self.sent("device_add"), [])
 
+    def test_usb_spec_command_prints_normalized_valid_spec(self):
+        result = subprocess.run([sys.executable, "-B", str(QMP), "usb-spec", "1050:0407"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "1050:0407")
+
+    def test_usb_spec_command_normalizes_uppercase_to_lowercase(self):
+        result = subprocess.run([sys.executable, "-B", str(QMP), "usb-spec", "ABCD:EF01"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.strip(), "abcd:ef01")
+
+    def test_usb_spec_command_rejects_invalid_spec(self):
+        result = subprocess.run([sys.executable, "-B", str(QMP), "usb-spec", "lizard"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("VID:PID", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
