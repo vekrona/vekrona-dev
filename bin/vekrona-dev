@@ -73,6 +73,15 @@ require_running() {
   [[ "$(instance_status)" == Running ]] || die "VM '$INSTANCE' is not running; run: vekrona-dev up"
 }
 
+require_mounted_repo() {
+  local mounted_repo
+  mounted_repo="$(limactl list --json "$INSTANCE" | python3 -c 'import json, sys
+print(next(m["location"] for m in json.load(sys.stdin)["config"]["mounts"] if m["mountPoint"] == sys.argv[1]))' "$GUEST_VEKRONA_MOUNT")" \
+    || die "cannot read the mounts of $INSTANCE"
+  [[ "$mounted_repo" == "$VEKRONA_REPO" ]] \
+    || die "$INSTANCE mounts $mounted_repo but VEKRONA_REPO=$VEKRONA_REPO; run: vekrona-dev destroy"
+}
+
 qmp() { python3 -B "$DEV_ROOT/lib/qmp.py" --sock "$(lima_dir)/qmp.sock" "$@"; }
 guest() { limactl shell --workdir / "$INSTANCE" -- "$@"; }
 guest_login_shell() { guest bash -lc "$1" vekrona-dev "${@:2}"; }
@@ -97,6 +106,7 @@ cmd_up() {
     log "creating $INSTANCE with $VEKRONA_REPO mounted at $GUEST_VEKRONA_MOUNT"
     limactl create --name "$INSTANCE" --tty=false --set "$(mounts_expression)" "$DEV_ROOT/lima/vekrona.yaml"
   fi
+  require_mounted_repo
   [[ "$(instance_status)" == Running ]] || limactl start --tty=false "$INSTANCE"
   guest test -f "$GUEST_VEKRONA_MOUNT/install.sh" \
     || die "$GUEST_VEKRONA_MOUNT in the guest is not a vekrona checkout; the VM was created for another VEKRONA_REPO, run: vekrona-dev destroy"
@@ -110,6 +120,7 @@ cmd_sync() {
     *) usage ;;
   esac
   require_running
+  require_mounted_repo
   if [[ -n "$rev" ]]; then
     log "syncing committed $rev into ~/$GUEST_CHECKOUT"
     guest bash -c 'set -euo pipefail
